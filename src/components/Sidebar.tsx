@@ -45,6 +45,7 @@ interface SidebarProps {
   onOpenGuide: () => void;
   isMobileOpen: boolean;
   onCloseMobile: () => void;
+  isUsingFirestore?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -66,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenGuide,
   isMobileOpen,
   onCloseMobile,
+  isUsingFirestore = false,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
 
@@ -446,8 +448,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <div className="pt-2 px-1 text-[11px] text-slate-400 dark:text-slate-500 flex items-center justify-between">
-            <span>Firestore Đã kết nối</span>
-            <span className="font-mono">Tự động đồng bộ</span>
+            <span className={isUsingFirestore ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+              {isUsingFirestore ? 'Firestore Online' : 'Lưu trữ Cục bộ'}
+            </span>
+            <span className="font-mono">
+              {isUsingFirestore ? 'Đang đồng bộ' : 'Tự động lưu'}
+            </span>
           </div>
         </div>
       </aside>

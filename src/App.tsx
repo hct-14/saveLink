@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   collection,
   query,
@@ -15,11 +15,14 @@ import {
   deleteDoc,
   writeBatch,
 } from 'firebase/firestore';
-import { User } from 'firebase/auth';
+import { User, onAuthStateChanged } from 'firebase/auth';
 import {
   auth,
   db,
-  ensureAnonymousAuth,
+  tryAnonymousAuth,
+  loginWithGoogle,
+  logoutUser,
+  getOrCreateLocalUserId,
   handleFirestoreError,
   OperationType,
 } from './lib/firebase';
@@ -34,15 +37,39 @@ import { CategoryModal } from './components/CategoryModal';
 import { ImportExportModal } from './components/ImportExportModal';
 import { LocalSetupGuideModal } from './components/LocalSetupGuideModal';
 import { EmptyState } from './components/EmptyState';
-import { Loader2, CheckCircle2, AlertCircle, Info, Sparkles } from 'lucide-react';
+import { CheckCircle2, AlertCircle, Info, Cloud, CloudOff, LogIn, LogOut, Key } from 'lucide-react';
+
+const LOCAL_STORAGE_CATEGORIES_KEY = 'smart_bookmark_local_categories';
+const LOCAL_STORAGE_BOOKMARKS_KEY = 'smart_bookmark_local_bookmarks';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [localUserId] = useState<string>(() => getOrCreateLocalUserId());
 
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
-  const [isDataLoaded, setIsDataLoaded] = useState(false);
+  // Data state (with offline/local storage fallback)
+  const [categories, setCategories] = useState<Category[]>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_CATEGORIES_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return [];
+  });
+
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_BOOKMARKS_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return [];
+  });
+
+  // Track if we need to sync local changes to localStorage
+  const isUsingFirestore = Boolean(user);
 
   // View & Filter states
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
@@ -72,6 +99,7 @@ export default function App() {
   const [isImportExportOpen, setIsImportExportOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isAuthHelpOpen, setIsAuthHelpOpen] = useState(false);
 
   // Global Toast
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -80,10 +108,10 @@ export default function App() {
     setToast({ message, type });
     setTimeout(() => {
       setToast(null);
-    }, 3500);
+    }, 4000);
   };
 
-  // Sync theme with document element
+  // Sync theme
   useEffect(() => {
     if (theme === 'dark') {
       document.documentElement.classList.add('dark');
@@ -102,30 +130,58 @@ export default function App() {
     localStorage.setItem('smart_bookmark_view', mode);
   };
 
-  // 1. Initialize Anonymous Firebase Auth
+  // Always mirror categories & bookmarks to localStorage for instant local backup
   useEffect(() => {
-    let isMounted = true;
-    ensureAnonymousAuth()
-      .then((currUser) => {
-        if (isMounted) {
-          setUser(currUser);
-          setAuthLoading(false);
+    try {
+      localStorage.setItem(LOCAL_STORAGE_CATEGORIES_KEY, JSON.stringify(categories));
+    } catch {
+      // ignore
+    }
+  }, [categories]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_BOOKMARKS_KEY, JSON.stringify(bookmarks));
+    } catch {
+      // ignore
+    }
+  }, [bookmarks]);
+
+  // Seed sample data if empty
+  useEffect(() => {
+    const hasInitialized = localStorage.getItem('smart_bookmark_initialized_seed');
+    if (!hasInitialized && categories.length === 0 && bookmarks.length === 0) {
+      localStorage.setItem('smart_bookmark_initialized_seed', 'true');
+      const sampleCats = getSampleCategories(localUserId);
+      const sampleBms = getSampleBookmarks(localUserId, sampleCats);
+      setCategories(sampleCats);
+      setBookmarks(sampleBms);
+    }
+  }, [categories.length, bookmarks.length, localUserId]);
+
+  // 1. Auth Listener & Initial Connection
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+
+    // Try background anonymous auth (if enabled on Firebase Console)
+    tryAnonymousAuth()
+      .then((anonUser) => {
+        if (anonUser) {
+          setUser(anonUser);
         }
       })
-      .catch((err) => {
-        console.error('Lỗi khởi tạo Anonymous Auth:', err);
-        if (isMounted) {
-          setAuthLoading(false);
-          showToast('Không thể kết nối phiên lưu trữ trực tuyến', 'error');
-        }
+      .finally(() => {
+        setAuthLoading(false);
       });
 
-    return () => {
-      isMounted = false;
-    };
+    return () => unsubscribe();
   }, []);
 
-  // 2. Realtime listener for Categories & Bookmarks
+  // 2. Realtime Firestore Synchronization when user is authenticated
+  const hasSyncedInitialData = useRef(false);
   useEffect(() => {
     if (!user) return;
 
@@ -139,8 +195,8 @@ export default function App() {
       where('userId', '==', user.uid)
     );
 
-    let categoriesReady = false;
-    let bookmarksReady = false;
+    let serverCategoriesCount = 0;
+    let serverBookmarksCount = 0;
 
     const unsubCategories = onSnapshot(
       categoriesQuery,
@@ -149,15 +205,13 @@ export default function App() {
         snapshot.forEach((docSnap) => {
           loadedCats.push({ id: docSnap.id, ...docSnap.data() } as Category);
         });
-        setCategories(loadedCats);
-        categoriesReady = true;
-
-        if (categoriesReady && bookmarksReady) {
-          setIsDataLoaded(true);
+        serverCategoriesCount = loadedCats.length;
+        if (loadedCats.length > 0) {
+          setCategories(loadedCats);
         }
       },
       (error) => {
-        handleFirestoreError(error, OperationType.GET, 'categories');
+        console.warn('Firestore categories listener:', error);
       }
     );
 
@@ -168,15 +222,38 @@ export default function App() {
         snapshot.forEach((docSnap) => {
           loadedBms.push({ id: docSnap.id, ...docSnap.data() } as Bookmark);
         });
-        setBookmarks(loadedBms);
-        bookmarksReady = true;
+        serverBookmarksCount = loadedBms.length;
+        if (loadedBms.length > 0) {
+          setBookmarks(loadedBms);
+        }
 
-        if (categoriesReady && bookmarksReady) {
-          setIsDataLoaded(true);
+        // If user logged in and server is empty but local has items, migrate local to server
+        if (!hasSyncedInitialData.current) {
+          hasSyncedInitialData.current = true;
+          if (serverCategoriesCount === 0 && serverBookmarksCount === 0 && categories.length > 0) {
+            const batch = writeBatch(db);
+            const now = new Date().toISOString();
+
+            categories.forEach((cat) => {
+              const catRef = doc(db, 'categories', cat.id);
+              batch.set(catRef, { ...cat, userId: user.uid, updatedAt: now });
+            });
+
+            bookmarks.forEach((bm) => {
+              const bmRef = doc(db, 'bookmarks', bm.id);
+              batch.set(bmRef, { ...bm, userId: user.uid, updatedAt: now });
+            });
+
+            batch.commit().then(() => {
+              showToast('Đã đồng bộ dữ liệu lên Firebase Firestore!', 'success');
+            }).catch((err) => {
+              console.error('Error migrating to Firestore:', err);
+            });
+          }
         }
       },
       (error) => {
-        handleFirestoreError(error, OperationType.GET, 'bookmarks');
+        console.warn('Firestore bookmarks listener:', error);
       }
     );
 
@@ -186,68 +263,60 @@ export default function App() {
     };
   }, [user]);
 
-  // 3. Seed initial sample data if new user has 0 categories & 0 bookmarks
-  useEffect(() => {
-    if (!user || !isDataLoaded) return;
-
-    // Check if initial seed has already run for this browser session
-    const seedKey = `smart_bookmark_seeded_${user.uid}`;
-    if (localStorage.getItem(seedKey)) return;
-
-    if (categories.length === 0 && bookmarks.length === 0) {
-      localStorage.setItem(seedKey, 'true');
-      const seedInitialData = async () => {
-        try {
-          const sampleCats = getSampleCategories(user.uid);
-          const sampleBms = getSampleBookmarks(user.uid, sampleCats);
-
-          const batch = writeBatch(db);
-
-          sampleCats.forEach((cat) => {
-            const catRef = doc(db, 'categories', cat.id);
-            batch.set(catRef, cat);
-          });
-
-          sampleBms.forEach((bm) => {
-            const bmRef = doc(db, 'bookmarks', bm.id);
-            batch.set(bmRef, bm);
-          });
-
-          await batch.commit();
-          showToast('Đã nạp sẵn danh mục và liên kết mẫu!', 'info');
-        } catch (err) {
-          console.error('Lỗi nạp dữ liệu mẫu ban đầu:', err);
-        }
-      };
-
-      seedInitialData();
+  // Handle Google Login
+  const handleGoogleLogin = async () => {
+    try {
+      const loggedUser = await loginWithGoogle();
+      setUser(loggedUser);
+      showToast(`Đăng nhập thành công: ${loggedUser.email || loggedUser.displayName || 'Tài khoản Google'}`);
+    } catch (err: unknown) {
+      console.error('Google login error:', err);
+      showToast(err instanceof Error ? err.message : 'Đăng nhập không thành công', 'error');
     }
-  }, [user, isDataLoaded, categories.length, bookmarks.length]);
+  };
 
-  // Bookmark Actions
+  // Handle Logout
+  const handleLogout = async () => {
+    try {
+      await logoutUser();
+      setUser(null);
+      showToast('Đã đăng xuất, quay về chế độ lưu cục bộ', 'info');
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
+
+  // Bookmark Actions (Resilient: Writes to Firestore if connected, otherwise local state)
   const handleSaveBookmark = async (bookmarkData: Partial<Bookmark>) => {
-    if (!user) throw new Error('Chưa kết nối phiên làm việc');
+    const effectiveUserId = user ? user.uid : localUserId;
     const now = new Date().toISOString();
 
     if (editingBookmark) {
-      // Update
-      const docRef = doc(db, 'bookmarks', editingBookmark.id);
-      try {
-        await updateDoc(docRef, {
-          ...bookmarkData,
-          updatedAt: now,
-        });
-        showToast('Đã cập nhật bookmark thành công!');
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `bookmarks/${editingBookmark.id}`);
+      const updated: Bookmark = {
+        ...editingBookmark,
+        ...bookmarkData,
+        updatedAt: now,
+      };
+
+      if (user) {
+        try {
+          const docRef = doc(db, 'bookmarks', editingBookmark.id);
+          await updateDoc(docRef, {
+            ...bookmarkData,
+            updatedAt: now,
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `bookmarks/${editingBookmark.id}`);
+        }
       }
+
+      setBookmarks((prev) => prev.map((b) => (b.id === editingBookmark.id ? updated : b)));
+      showToast('Đã cập nhật bookmark thành công!');
     } else {
-      // Create
       const newId = `bm_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const docRef = doc(db, 'bookmarks', newId);
       const newRecord: Bookmark = {
         id: newId,
-        userId: user.uid,
+        userId: effectiveUserId,
         url: bookmarkData.url || '',
         cleanUrl: bookmarkData.cleanUrl || bookmarkData.url || '',
         title: bookmarkData.title || '',
@@ -262,66 +331,91 @@ export default function App() {
         updatedAt: now,
       };
 
-      try {
-        await setDoc(docRef, newRecord);
-        showToast('Đã lưu liên kết mới thành công!');
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, `bookmarks/${newId}`);
+      if (user) {
+        try {
+          const docRef = doc(db, 'bookmarks', newId);
+          await setDoc(docRef, newRecord);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.CREATE, `bookmarks/${newId}`);
+        }
       }
+
+      setBookmarks((prev) => [newRecord, ...prev]);
+      showToast('Đã lưu liên kết mới thành công!');
     }
   };
 
   const handleToggleFavorite = async (bookmark: Bookmark) => {
-    const docRef = doc(db, 'bookmarks', bookmark.id);
     const newFav = !bookmark.isFavorite;
-    try {
-      await updateDoc(docRef, {
-        isFavorite: newFav,
-        updatedAt: new Date().toISOString(),
-      });
-      showToast(newFav ? 'Đã thêm vào yêu thích' : 'Đã bỏ yêu thích', 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `bookmarks/${bookmark.id}`);
+    const now = new Date().toISOString();
+
+    if (user) {
+      try {
+        const docRef = doc(db, 'bookmarks', bookmark.id);
+        await updateDoc(docRef, {
+          isFavorite: newFav,
+          updatedAt: now,
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `bookmarks/${bookmark.id}`);
+      }
     }
+
+    setBookmarks((prev) =>
+      prev.map((b) => (b.id === bookmark.id ? { ...b, isFavorite: newFav, updatedAt: now } : b))
+    );
+    showToast(newFav ? 'Đã thêm vào yêu thích' : 'Đã bỏ yêu thích', 'info');
   };
 
   const handleDeleteBookmark = async (bookmark: Bookmark) => {
     if (!window.confirm(`Bạn có chắc muốn xóa liên kết "${bookmark.title}" không?`)) {
       return;
     }
-    const docRef = doc(db, 'bookmarks', bookmark.id);
-    try {
-      await deleteDoc(docRef);
-      showToast('Đã xóa bookmark');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `bookmarks/${bookmark.id}`);
+
+    if (user) {
+      try {
+        const docRef = doc(db, 'bookmarks', bookmark.id);
+        await deleteDoc(docRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `bookmarks/${bookmark.id}`);
+      }
     }
+
+    setBookmarks((prev) => prev.filter((b) => b.id !== bookmark.id));
+    showToast('Đã xóa bookmark');
   };
 
-  // Category Actions
+  // Category Actions (Resilient: Never throws "Chưa kết nối phiên làm việc")
   const handleSaveCategory = async (categoryData: Partial<Category>) => {
-    if (!user) throw new Error('Chưa kết nối phiên làm việc');
+    const effectiveUserId = user ? user.uid : localUserId;
     const now = new Date().toISOString();
 
     if (editingCategory) {
-      // Update
-      const docRef = doc(db, 'categories', editingCategory.id);
-      try {
-        await updateDoc(docRef, {
-          ...categoryData,
-          updatedAt: now,
-        });
-        showToast('Đã cập nhật thư mục');
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `categories/${editingCategory.id}`);
+      const updatedCat: Category = {
+        ...editingCategory,
+        ...categoryData,
+        updatedAt: now,
+      };
+
+      if (user) {
+        try {
+          const docRef = doc(db, 'categories', editingCategory.id);
+          await updateDoc(docRef, {
+            ...categoryData,
+            updatedAt: now,
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `categories/${editingCategory.id}`);
+        }
       }
+
+      setCategories((prev) => prev.map((c) => (c.id === editingCategory.id ? updatedCat : c)));
+      showToast('Đã cập nhật thư mục');
     } else {
-      // Create
       const newId = `cat_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const docRef = doc(db, 'categories', newId);
       const newCat: Category = {
         id: newId,
-        userId: user.uid,
+        userId: effectiveUserId,
         name: categoryData.name || 'Thư mục mới',
         parentId: categoryData.parentId || null,
         icon: categoryData.icon || 'Folder',
@@ -331,17 +425,21 @@ export default function App() {
         updatedAt: now,
       };
 
-      try {
-        await setDoc(docRef, newCat);
-        showToast('Đã tạo thư mục mới!');
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, `categories/${newId}`);
+      if (user) {
+        try {
+          const docRef = doc(db, 'categories', newId);
+          await setDoc(docRef, newCat);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.CREATE, `categories/${newId}`);
+        }
       }
+
+      setCategories((prev) => [...prev, newCat]);
+      showToast('Đã tạo thư mục mới!');
     }
   };
 
   const handleDeleteCategory = async (category: Category) => {
-    // Check if category has subcategories or bookmarks
     const subcats = categories.filter((c) => c.parentId === category.id);
     const affectedBms = bookmarks.filter((b) => b.categoryId === category.id);
 
@@ -351,40 +449,38 @@ export default function App() {
 
     if (!window.confirm(confirmMsg)) return;
 
-    try {
-      const batch = writeBatch(db);
-
-      // Unlink affected bookmarks
-      affectedBms.forEach((bm) => {
-        const bmRef = doc(db, 'bookmarks', bm.id);
-        batch.update(bmRef, {
-          categoryId: null,
-          updatedAt: new Date().toISOString(),
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        affectedBms.forEach((bm) => {
+          const bmRef = doc(db, 'bookmarks', bm.id);
+          batch.update(bmRef, { categoryId: null, updatedAt: new Date().toISOString() });
         });
-      });
-
-      // Unlink child categories to root
-      subcats.forEach((sub) => {
-        const subRef = doc(db, 'categories', sub.id);
-        batch.update(subRef, {
-          parentId: null,
-          updatedAt: new Date().toISOString(),
+        subcats.forEach((sub) => {
+          const subRef = doc(db, 'categories', sub.id);
+          batch.update(subRef, { parentId: null, updatedAt: new Date().toISOString() });
         });
-      });
-
-      // Delete the category itself
-      const catRef = doc(db, 'categories', category.id);
-      batch.delete(catRef);
-
-      await batch.commit();
-
-      if (selectedCategoryId === category.id) {
-        setSelectedCategoryId(null);
+        const catRef = doc(db, 'categories', category.id);
+        batch.delete(catRef);
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `categories/${category.id}`);
       }
-      showToast('Đã xóa thư mục');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `categories/${category.id}`);
     }
+
+    setBookmarks((prev) =>
+      prev.map((b) => (b.categoryId === category.id ? { ...b, categoryId: null } : b))
+    );
+    setCategories((prev) =>
+      prev
+        .filter((c) => c.id !== category.id)
+        .map((c) => (c.parentId === category.id ? { ...c, parentId: null } : c))
+    );
+
+    if (selectedCategoryId === category.id) {
+      setSelectedCategoryId(null);
+    }
+    showToast('Đã xóa thư mục');
   };
 
   // Import / Export Data Action
@@ -397,57 +493,60 @@ export default function App() {
     bookmarks: Bookmark[];
     mode: 'merge' | 'overwrite';
   }) => {
-    if (!user) throw new Error('Chưa kết nối phiên làm việc');
+    const effectiveUserId = user ? user.uid : localUserId;
+    const now = new Date().toISOString();
 
-    try {
-      const batch = writeBatch(db);
-      const now = new Date().toISOString();
+    const preparedCategories = newCategories.map((c) => ({
+      ...c,
+      id: c.id || `cat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      userId: effectiveUserId,
+      createdAt: c.createdAt || now,
+      updatedAt: now,
+    }));
 
-      if (mode === 'overwrite') {
-        // Delete all current records
-        bookmarks.forEach((bm) => {
-          batch.delete(doc(db, 'bookmarks', bm.id));
-        });
-        categories.forEach((cat) => {
-          batch.delete(doc(db, 'categories', cat.id));
-        });
+    const preparedBookmarks = newBookmarks.map((b) => ({
+      ...b,
+      id: b.id || `bm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      userId: effectiveUserId,
+      createdAt: b.createdAt || now,
+      updatedAt: now,
+    }));
+
+    if (user) {
+      try {
+        const batch = writeBatch(db);
+        if (mode === 'overwrite') {
+          bookmarks.forEach((bm) => batch.delete(doc(db, 'bookmarks', bm.id)));
+          categories.forEach((cat) => batch.delete(doc(db, 'categories', cat.id)));
+        }
+        preparedCategories.forEach((cat) => batch.set(doc(db, 'categories', cat.id), cat));
+        preparedBookmarks.forEach((bm) => batch.set(doc(db, 'bookmarks', bm.id), bm));
+        await batch.commit();
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'import');
       }
-
-      // Add new categories
-      newCategories.forEach((cat) => {
-        const cleanCatId = cat.id || `cat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        batch.set(doc(db, 'categories', cleanCatId), {
-          ...cat,
-          id: cleanCatId,
-          userId: user.uid,
-          updatedAt: now,
-          createdAt: cat.createdAt || now,
-        });
-      });
-
-      // Add new bookmarks
-      newBookmarks.forEach((bm) => {
-        const cleanBmId = bm.id || `bm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        batch.set(doc(db, 'bookmarks', cleanBmId), {
-          ...bm,
-          id: cleanBmId,
-          userId: user.uid,
-          updatedAt: now,
-          createdAt: bm.createdAt || now,
-        });
-      });
-
-      await batch.commit();
-      showToast('Đã khôi phục dữ liệu từ tệp JSON thành công!');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'import');
     }
+
+    if (mode === 'overwrite') {
+      setCategories(preparedCategories);
+      setBookmarks(preparedBookmarks);
+    } else {
+      setCategories((prev) => {
+        const existingIds = new Set(prev.map((c) => c.id));
+        return [...prev, ...preparedCategories.filter((c) => !existingIds.has(c.id))];
+      });
+      setBookmarks((prev) => {
+        const existingIds = new Set(prev.map((b) => b.id));
+        return [...prev, ...preparedBookmarks.filter((b) => !existingIds.has(b.id))];
+      });
+    }
+
+    showToast('Đã khôi phục dữ liệu từ tệp JSON thành công!');
   };
 
   // Filter & Search computation
   const filteredBookmarks = useMemo(() => {
     return bookmarks.filter((bm) => {
-      // 1. Filter by Quick category / favorites
       if (selectedFilter === 'favorites' && !bm.isFavorite) {
         return false;
       }
@@ -455,7 +554,6 @@ export default function App() {
         return false;
       }
       if (selectedFilter === 'all' && selectedCategoryId) {
-        // Find subcategories of this category
         const subIds = categories
           .filter((c) => c.parentId === selectedCategoryId)
           .map((c) => c.id);
@@ -465,12 +563,10 @@ export default function App() {
         if (!matchCat) return false;
       }
 
-      // 2. Filter by Tag
       if (selectedTag && (!bm.tags || !bm.tags.includes(selectedTag))) {
         return false;
       }
 
-      // 3. Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const inTitle = bm.title.toLowerCase().includes(q);
@@ -504,17 +600,7 @@ export default function App() {
     });
   }, [filteredBookmarks, sortBy]);
 
-  // Category name for empty state
   const activeCategoryName = categories.find((c) => c.id === selectedCategoryId)?.name;
-
-  if (authLoading) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 gap-3">
-        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-        <span className="text-sm font-medium">Đang khởi tạo Smart Bookmark...</span>
-      </div>
-    );
-  }
 
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 overflow-hidden font-sans">
@@ -557,10 +643,59 @@ export default function App() {
         onOpenGuide={() => setIsGuideOpen(true)}
         isMobileOpen={isMobileSidebarOpen}
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
+        isUsingFirestore={isUsingFirestore}
       />
 
       {/* Main Content Workspace */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Sync Status Banner */}
+        <div className="px-4 py-1.5 text-xs bg-slate-100/90 dark:bg-slate-900/90 border-b border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 truncate">
+            {isUsingFirestore ? (
+              <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                <Cloud className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Đồng bộ Firebase Firestore: {user?.email || 'Phiên trực tuyến'}</span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-medium">
+                <CloudOff className="w-3.5 h-3.5 shrink-0" />
+                <span>Chế độ lưu cục bộ (Local). Dữ liệu được lưu an toàn trên máy bạn.</span>
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {isUsingFirestore ? (
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-rose-600 dark:text-slate-400 dark:hover:text-rose-400 hover:underline"
+                title="Đăng xuất"
+              >
+                <LogOut className="w-3 h-3" />
+                <span>Đăng xuất</span>
+              </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleGoogleLogin}
+                  className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-medium bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-indigo-600 dark:text-indigo-400 border border-slate-200 dark:border-slate-700 rounded-md shadow-2xs transition-colors"
+                  title="Đăng nhập tài khoản Google để đồng bộ lên Firebase Firestore"
+                >
+                  <LogIn className="w-3 h-3" />
+                  <span>Đồng bộ Google</span>
+                </button>
+                <button
+                  onClick={() => setIsAuthHelpOpen(true)}
+                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  title="Chi tiết trạng thái kết nối"
+                >
+                  <Info className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Top Header */}
         <Header
           searchQuery={searchQuery}
@@ -686,6 +821,43 @@ export default function App() {
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
       />
+
+      {/* Auth Help Modal */}
+      {isAuthHelpOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
+          <div className="relative w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl p-6 space-y-4">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                <Key className="w-4 h-4" />
+              </div>
+              <h3 className="font-semibold text-slate-900 dark:text-white">
+                Trạng thái lưu trữ dữ liệu
+              </h3>
+            </div>
+
+            <div className="text-xs text-slate-600 dark:text-slate-300 space-y-2.5 leading-relaxed">
+              <p>
+                <strong>1. Chế độ hiện tại:</strong> Đang lưu trữ cục bộ (Offline-First) trên trình duyệt của bạn. Bạn có thể thoải mái thêm link, tạo thư mục con, gắn tag, xuất JSON mà không bao giờ bị gián đoạn.
+              </p>
+              <p>
+                <strong>2. Muốn đồng bộ lên đám mây Firestore:</strong> Bạn có thể nhấn nút <strong>"Đồng bộ Google"</strong> ở góc trên bên phải để đăng nhập ngay bằng tài khoản Google. Dữ liệu trên máy sẽ tự động tải lên cơ sở dữ liệu Firebase.
+              </p>
+              <p>
+                <strong>3. Về chế độ Đăng nhập Ẩn danh (Anonymous Auth):</strong> Mặc định trên Firebase Console nhà cung cấp Anonymous đang tắt. Bạn có thể bật tại mục <em>Authentication → Sign-in method → Anonymous → Enable</em> nếu không muốn dùng tài khoản Google.
+              </p>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                onClick={() => setIsAuthHelpOpen(false)}
+                className="px-4 py-2 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl"
+              >
+                Đã hiểu
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {toast && (

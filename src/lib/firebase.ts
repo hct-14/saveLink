@@ -1,5 +1,13 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, User } from 'firebase/auth';
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut,
+  onAuthStateChanged,
+  User,
+} from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -67,26 +75,39 @@ export async function testConnection() {
 
 testConnection();
 
-// Auto Anonymous Authentication guarantee
-export async function ensureAnonymousAuth(): Promise<User> {
+// Try Anonymous Authentication with graceful failure return
+export async function tryAnonymousAuth(): Promise<User | null> {
   if (auth.currentUser) {
     return auth.currentUser;
   }
-  return new Promise((resolve, reject) => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-        unsubscribe();
-        resolve(user);
-      } else {
-        try {
-          const cred = await signInAnonymously(auth);
-          unsubscribe();
-          resolve(cred.user);
-        } catch (err) {
-          unsubscribe();
-          reject(err);
-        }
-      }
-    });
-  });
+  try {
+    const cred = await signInAnonymously(auth);
+    return cred.user;
+  } catch (err: unknown) {
+    console.warn('Anonymous auth is not enabled in Firebase Console yet:', err);
+    return null;
+  }
+}
+
+// Google Sign In (pre-configured & authorized by ProvisionFirebase)
+export async function loginWithGoogle(): Promise<User> {
+  const provider = new GoogleAuthProvider();
+  const cred = await signInWithPopup(auth, provider);
+  return cred.user;
+}
+
+// Sign out
+export async function logoutUser(): Promise<void> {
+  await signOut(auth);
+}
+
+// Get or create persistent local user id for offline fallback
+export function getOrCreateLocalUserId(): string {
+  const key = 'smart_bookmark_local_uid';
+  let uid = localStorage.getItem(key);
+  if (!uid) {
+    uid = `local_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    localStorage.setItem(key, uid);
+  }
+  return uid;
 }
