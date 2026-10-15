@@ -1,0 +1,152 @@
+{
+  "entities": {
+    "Category": {
+      "title": "Category",
+      "description": "Danh mục hoặc thư mục phân cấp lưu trữ bookmark",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "description": "ID duy nhất của danh mục"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "UID người dùng sở hữu"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Tên danh mục"
+        },
+        "parentId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "ID danh mục cha (nếu là thư mục con) hoặc null/empty"
+        },
+        "icon": {
+          "type": "string",
+          "maxLength": 50,
+          "description": "Tên icon đại diện"
+        },
+        "color": {
+          "type": "string",
+          "maxLength": 30,
+          "description": "Mã màu chủ đề của danh mục"
+        },
+        "order": {
+          "type": "number",
+          "description": "Thứ tự sắp xếp hiển thị"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Thời gian tạo bản ghi"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Thời gian cập nhật gần nhất"
+        }
+      },
+      "required": ["userId", "name", "createdAt", "updatedAt"]
+    },
+    "Bookmark": {
+      "title": "Bookmark",
+      "description": "Đường link tài liệu do người dùng lưu trữ",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "description": "ID duy nhất của bookmark"
+        },
+        "userId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "UID người dùng sở hữu"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "Đường link gốc"
+        },
+        "cleanUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "description": "Đường link đã chuẩn hóa để phát hiện trùng lặp"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Tiêu đề trang web hoặc tài liệu"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "Mô tả ngắn của trang web"
+        },
+        "favicon": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "URL favicon của website"
+        },
+        "imageUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "URL ảnh thumbnail đại diện OpenGraph"
+        },
+        "categoryId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "ID danh mục chứa bookmark này"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Danh sách nhãn phân loại (tối đa 10 tag)"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 5000,
+          "description": "Ghi chú cá nhân cho tài liệu"
+        },
+        "isFavorite": {
+          "type": "boolean",
+          "description": "Trạng thái đánh dấu yêu thích"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Thời gian tạo"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Thời gian cập nhật"
+        }
+      },
+      "required": ["userId", "url", "cleanUrl", "title", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/categories/{categoryId}": {
+      "schema": {
+        "$ref": "#/entities/Category"
+      },
+      "description": "Bộ sưu tập các thư mục và danh mục của người dùng"
+    },
+    "/bookmarks/{bookmarkId}": {
+      "schema": {
+        "$ref": "#/entities/Bookmark"
+      },
+      "description": "Bộ sưu tập các đường link tài liệu của người dùng"
+    }
+  }
+}

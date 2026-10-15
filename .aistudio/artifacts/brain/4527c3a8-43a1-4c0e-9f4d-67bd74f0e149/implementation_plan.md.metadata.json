@@ -1,0 +1,6 @@
+{
+  "summary": "Kế hoạch kiến trúc và triển khai ứng dụng Smart Bookmark: Hệ thống quản lý link tài liệu tiếng Việt với Firebase Firestore, Anonymous Auth, tự động lấy metadata, quản lý thư mục đa cấp, gắn tag, phát hiện link trùng, tìm kiếm thông minh và Dark/Light mode.",
+  "updatedAt": "2026-10-14T16:13:04.037350417Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

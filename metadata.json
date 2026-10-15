@@ -1,0 +1,6 @@
+{
+  "name": "Smart Bookmark",
+  "description": "Hệ thống quản lý và lưu trữ liên kết tài liệu thông minh với Firebase Firestore, tự động lấy thông tin website, hỗ trợ thư mục đa cấp và Dark Mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
