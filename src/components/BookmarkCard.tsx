@@ -6,9 +6,9 @@ import {
   Check,
   Edit2,
   Trash2,
-  Tag as TagIcon,
   Globe,
   FileText,
+  QrCode,
 } from 'lucide-react';
 import { Bookmark, Category } from '../types';
 import { getDomainFromUrl, formatTimeAgoVi } from '../lib/urlUtils';
@@ -20,6 +20,7 @@ interface BookmarkCardProps {
   onEdit: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
   onSelectTag: (tag: string) => void;
+  onShowQr: (bookmark: Bookmark) => void;
 }
 
 export const BookmarkCard: React.FC<BookmarkCardProps> = ({
@@ -29,6 +30,7 @@ export const BookmarkCard: React.FC<BookmarkCardProps> = ({
   onEdit,
   onDelete,
   onSelectTag,
+  onShowQr,
 }) => {
   const [copied, setCopied] = useState(false);
   const [imgError, setImgError] = useState(false);
@@ -181,6 +183,13 @@ export const BookmarkCard: React.FC<BookmarkCardProps> = ({
 
           {/* Action toolbar */}
           <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={() => onShowQr(bookmark)}
+              className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md transition-colors"
+              title="Hiển thị mã QR"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+            </button>
             <button
               onClick={handleCopy}
               className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md transition-colors"

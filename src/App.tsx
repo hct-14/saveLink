@@ -37,6 +37,7 @@ import { CategoryModal } from './components/CategoryModal';
 import { ImportExportModal } from './components/ImportExportModal';
 import { LocalSetupGuideModal } from './components/LocalSetupGuideModal';
 import { EmptyState } from './components/EmptyState';
+import { QrCodeModal } from './components/QrCodeModal';
 import { CheckCircle2, AlertCircle, Info, Cloud, CloudOff, LogIn, LogOut, Key } from 'lucide-react';
 
 const LOCAL_STORAGE_CATEGORIES_KEY = 'smart_bookmark_local_categories';
@@ -100,6 +101,7 @@ export default function App() {
   const [isGuideOpen, setIsGuideOpen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isAuthHelpOpen, setIsAuthHelpOpen] = useState(false);
+  const [qrBookmark, setQrBookmark] = useState<Bookmark | null>(null);
 
   // Global Toast
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
@@ -755,6 +757,7 @@ export default function App() {
                     }}
                     onDelete={handleDeleteBookmark}
                     onSelectTag={(tag) => setSelectedTag(tag)}
+                    onShowQr={(bm) => setQrBookmark(bm)}
                   />
                 ))}
               </div>
@@ -772,6 +775,7 @@ export default function App() {
                     }}
                     onDelete={handleDeleteBookmark}
                     onSelectTag={(tag) => setSelectedTag(tag)}
+                    onShowQr={(bm) => setQrBookmark(bm)}
                   />
                 ))}
               </div>
@@ -779,6 +783,13 @@ export default function App() {
           </div>
         </main>
       </div>
+
+      {/* QR Code Modal */}
+      <QrCodeModal
+        bookmark={qrBookmark}
+        isOpen={Boolean(qrBookmark)}
+        onClose={() => setQrBookmark(null)}
+      />
 
       {/* Add / Edit Bookmark Modal */}
       <AddBookmarkModal

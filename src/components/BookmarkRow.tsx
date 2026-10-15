@@ -8,6 +8,7 @@ import {
   Trash2,
   Globe,
   FileText,
+  QrCode,
 } from 'lucide-react';
 import { Bookmark, Category } from '../types';
 import { getDomainFromUrl, formatTimeAgoVi } from '../lib/urlUtils';
@@ -19,6 +20,7 @@ interface BookmarkRowProps {
   onEdit: (bookmark: Bookmark) => void;
   onDelete: (bookmark: Bookmark) => void;
   onSelectTag: (tag: string) => void;
+  onShowQr: (bookmark: Bookmark) => void;
 }
 
 export const BookmarkRow: React.FC<BookmarkRowProps> = ({
@@ -28,6 +30,7 @@ export const BookmarkRow: React.FC<BookmarkRowProps> = ({
   onEdit,
   onDelete,
   onSelectTag,
+  onShowQr,
 }) => {
   const [copied, setCopied] = useState(false);
   const domain = getDomainFromUrl(bookmark.url);
@@ -130,6 +133,14 @@ export const BookmarkRow: React.FC<BookmarkRowProps> = ({
           <Star
             className={`w-4 h-4 ${bookmark.isFavorite ? 'fill-current' : ''}`}
           />
+        </button>
+
+        <button
+          onClick={() => onShowQr(bookmark)}
+          className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
+          title="Hiển thị mã QR"
+        >
+          <QrCode className="w-4 h-4" />
         </button>
 
         <button
